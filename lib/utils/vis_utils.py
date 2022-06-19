@@ -240,3 +240,20 @@ def get_colored_pc(pts, rgb):
     colors += rgb
     pc.colors = o3d.utility.Vector3dVector(colors)
     return pc
+
+def generate_bar(N):
+    bar = ((np.arange(N)/(N-1))*255).astype(np.uint8).reshape(-1, 1)
+    colorbar = cv2.applyColorMap(bar, cv2.COLORMAP_JET).squeeze()
+    return colorbar
+
+def write_pcd(filename, points, colors):
+    import open3d as o3d
+    Vector3dVector = o3d.utility.Vector3dVector
+    points = np.vstack(points)
+    colors = np.vstack(colors)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = Vector3dVector(points)
+    if colors.dtype == np.uint8:
+        colors = colors / 255.
+    pcd.colors = Vector3dVector(colors)
+    o3d.io.write_point_cloud(filename, pcd)

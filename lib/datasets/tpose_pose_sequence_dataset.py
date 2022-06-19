@@ -9,6 +9,7 @@ import cv2
 from lib.config import cfg
 from lib.utils.if_nerf import if_nerf_data_utils as if_nerf_dutils
 from lib.utils.blend_utils import pts_sample_blend_weights
+from lib.utils.vis_utils import generate_bar, write_pcd
 from plyfile import PlyData
 from lib.utils import render_utils
 
@@ -78,6 +79,8 @@ class Dataset(data.Dataset):
         part_bounds_list = []
         for i in range(24):
             part_vertices = tvertices[0, torch.argmax(tbw, dim=0)==i, :]
+            if False:
+                write_pcd(f"part-{i}.ply", part_vertices.numpy(), generate_bar(part_vertices.shape[0]))
             part_center = torch.mean(part_vertices, dim=0)
             part_bounds = if_nerf_dutils.get_part_bounds(part_vertices.numpy())
             part_center_list.append( part_center )

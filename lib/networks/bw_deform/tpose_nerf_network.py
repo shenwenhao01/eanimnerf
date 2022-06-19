@@ -6,6 +6,7 @@ from lib.config import cfg
 from lib.utils.blend_utils import *
 from .. import embedder
 from lib.utils import net_utils
+from lib.utils.vis_utils import generate_bar, write_pcd
 
 
 class Network(nn.Module):
@@ -80,6 +81,7 @@ class Network(nn.Module):
         return tpose, pbw
 
     def calculate_alpha(self, wpts, batch):
+        raise NotImplementedError
         # transform points from the world space to the pose space
         wpts = wpts[None]
         pose_pts = world_points_to_pose_points(wpts, batch['R'], batch['Th'])
@@ -138,7 +140,8 @@ class Network(nn.Module):
         tbw = self.calculate_neural_blend_weights(tpose, init_tbw, ind)     # [1, 24, n]
 
         tcenters = batch['tcenters']                                        # 1 x 24 x 3
-        part_idx = torch.argmax(tbw, dim=1)                                 # 1 x n
+        #part_idx = torch.argmax(tbw, dim=1)                                 # 1 x n
+        part_idx = torch.argmax(init_tbw, dim=1)
         part_centers = tcenters[ 0, part_idx ]                              # 1 x n x 3
         tpart_coord = tpose - part_centers
 
@@ -185,36 +188,36 @@ class Network(nn.Module):
 class TPoseHuman(nn.Module):
     def __init__(self):
         super(TPoseHuman, self).__init__()
-
-        self.nf_latent = nn.Embedding(cfg.num_train_frame, 128)
+        
+        nf_latent_dim = 128
+        self.nf_latent = nn.Embedding(cfg.num_train_frame, nf_latent_dim)
 
         self.triplane_c = 24
-        self.triplane_res = 256
+        self.triplane_res = 128
         self.part_triplanes = nn.Parameter(
                                 torch.randn(24, self.triplane_c*3, self.triplane_res, self.triplane_res)
                                 )
 
         self.actvn = nn.ReLU()
 
-        input_ch = 63
-        D = 8
-        W = 256
+        #input_ch = 63
+        #D = 8
+        W = 128
         #self.skips = [4]
-        self.pts_linears = nn.Sequential(nn.Conv1d(self.triplane_c * 3, W, 1),
-                                            self.actvn,
-                                            nn.Conv1d(W, W, 1),
-                                            self.actvn,
-                                            nn.Conv1d(W, W, 1),
-                                            self.actvn      )
+        self.pts_linears = nn.ModuleList( [nn.Sequential(nn.Conv1d(self.triplane_c * 3, W, 1),
+                                                        self.actvn,
+                                                        nn.Conv1d(W, W, 1),
+                                                        self.actvn, ) for i in range(24)] )
                                         
-        self.alpha_fc = nn.Conv1d(W, 1, 1)
+        self.alpha_fc = nn.ModuleList([nn.Conv1d(W, 1, 1)for i in range(24)])
 
-        self.feature_fc = nn.Conv1d(W, W, 1)
-        self.latent_fc = nn.Conv1d(384, W, 1)
-        self.view_fc = nn.Conv1d(283, W // 2, 1)
-        self.rgb_fc = nn.Conv1d(W // 2, 3, 1)
+        self.feature_fc = nn.ModuleList([nn.Conv1d(W, W, 1) for i in range(24)])
+        self.latent_fc = nn.ModuleList([nn.Conv1d(nf_latent_dim + W, W, 1) for i in range(24)])
+        self.view_fc = nn.ModuleList([nn.Conv1d(W + 27, W // 2, 1) for i in range(24)])
+        self.rgb_fc = nn.ModuleList([nn.Conv1d(W // 2, 3, 1) for i in range(24)])
 
     def calculate_alpha(self, nf_pts):
+        raise NotImplementedError
         nf_pts = embedder.xyz_embedder(nf_pts)
         input_pts = nf_pts.transpose(1, 2)
         net = input_pts
@@ -262,15 +265,42 @@ class TPoseHuman(nn.Module):
         '''
         pts_bounds = part_bounds[0, part_idx]           # 1 x n x 2 x 3
         grid_coords = get_grid_coords(part_coord, pts_bounds)[None]
-        net = grid_coords.new_zeros((1, grid_coords.shape[1], self.triplane_c*3))
+        n = grid_coords.shape[1]
+        #net = grid_coords.new_zeros((1, n, self.triplane_c*3))
+        ret_alpha = grid_coords.new_zeros((1, n, 1))
+        ret_rgb = grid_coords.new_zeros((1, n, 3))      # 1 x n x 27
+        viewdir = embedder.view_embedder(viewdir)
         for i in range(24):
-            part_msk = (part_idx == i)
-            part_grid_coord = grid_coords[part_msk]
-            part_triplanes = self.part_triplanes[i]
-            part_feature = bilinear_sample_triplanes(part_grid_coord, part_triplanes)
-            net[part_msk] = part_feature
+            part_msk = (part_idx == i)                  # 1 x n
+            if part_msk.sum().item() != 0 :
+                part_grid_coord = grid_coords[part_msk]
+                part_triplanes = self.part_triplanes[i]
+                part_feature = bilinear_sample_triplanes(part_grid_coord, part_triplanes)
+                #net[part_msk] = part_feature
 
-        net = net.permute(0, 2, 1) 
+                net = part_feature[None].permute(0, 2, 1)
+                net = self.pts_linears[i]( net )
+                alpha = self.alpha_fc[i](net)
+                ret_alpha[part_msk] = alpha[0].transpose(0,1)
+
+                features = self.feature_fc[i](net)
+
+                latent = self.nf_latent(ind)
+                latent = latent[..., None].expand(*latent.shape, net.size(2))
+                features = torch.cat((features, latent), dim=1)
+                features = self.latent_fc[i](features)
+
+                viewdir_ = viewdir[part_msk].transpose(0,1)[None]
+                features = torch.cat((features, viewdir_), dim=1)
+                net = self.actvn(self.view_fc[i](features))
+                rgb = self.rgb_fc[i](net)
+                ret_rgb[part_msk] = rgb[0].transpose(0,1)
+        ret_alpha = ret_alpha.permute(0,2,1)
+        ret_rgb = ret_rgb.permute(0,2,1)
+                
+        return ret_alpha, ret_rgb
+
+        net = net.permute(0, 2, 1)
         net = self.pts_linears( net )
         alpha = self.alpha_fc(net)
 
@@ -286,7 +316,7 @@ class TPoseHuman(nn.Module):
         features = torch.cat((features, viewdir), dim=1)
         net = self.actvn(self.view_fc(features))
         rgb = self.rgb_fc(net)
-
+        
         return alpha, rgb
 
 class BackwardBlendWeight(nn.Module):

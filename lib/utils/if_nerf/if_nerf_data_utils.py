@@ -445,8 +445,8 @@ def get_bounds(xyz):
 def get_part_bounds(xyz):
     min_xyz = np.min(xyz, axis=0)
     max_xyz = np.max(xyz, axis=0)
-    min_xyz -= 0.005
-    max_xyz += 0.005
+    min_xyz -= 0.05
+    max_xyz += 0.05
     bounds = np.stack([min_xyz, max_xyz], axis=0)
     bounds = bounds.astype(np.float32)
     return bounds[None]
