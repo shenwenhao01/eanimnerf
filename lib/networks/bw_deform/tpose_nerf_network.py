@@ -76,7 +76,8 @@ class Network(nn.Module):
                 pose_pts, init_pbw, batch['latent_index'] + 1)
 
         # transform points from i to i_0
-        tpose = pose_points_to_tpose_points(pose_pts, pbw, batch['A'])
+        #tpose = pose_points_to_tpose_points(pose_pts, pbw, batch['A'])
+        tpose = pose_points_to_tpose_points(pose_pts, init_pbw, batch['A'])
 
         return tpose, pbw
 
@@ -180,7 +181,8 @@ class Network(nn.Module):
         raw_full = torch.zeros([n_batch, n_point, 4], dtype=wpts.dtype, device=wpts.device)
         raw_full[pind] = raw
 
-        ret = {'pbw': pbw, 'tbw': tbw, 'raw': raw_full}
+        #ret = {'pbw': pbw, 'tbw': tbw, 'raw': raw_full}
+        ret = {'raw': raw_full}
 
         return ret
 
@@ -197,24 +199,19 @@ class TPoseHuman(nn.Module):
         self.part_triplanes = nn.Parameter(
                                 torch.randn(24, self.triplane_c*3, self.triplane_res, self.triplane_res)
                                 )
-
         self.actvn = nn.ReLU()
-
-        #input_ch = 63
-        #D = 8
         W = 128
-        #self.skips = [4]
-        self.pts_linears = nn.ModuleList( [nn.Sequential(nn.Conv1d(self.triplane_c * 3, W, 1),
+        self.pts_linears = nn.Sequential(nn.Conv1d(self.triplane_c * 3, W, 1),
                                                         self.actvn,
                                                         nn.Conv1d(W, W, 1),
-                                                        self.actvn, ) for i in range(24)] )
+                                                        self.actvn, )
                                         
-        self.alpha_fc = nn.ModuleList([nn.Conv1d(W, 1, 1)for i in range(24)])
+        self.alpha_fc = nn.Conv1d(W, 1, 1)
 
-        self.feature_fc = nn.ModuleList([nn.Conv1d(W, W, 1) for i in range(24)])
-        self.latent_fc = nn.ModuleList([nn.Conv1d(nf_latent_dim + W, W, 1) for i in range(24)])
-        self.view_fc = nn.ModuleList([nn.Conv1d(W + 27, W // 2, 1) for i in range(24)])
-        self.rgb_fc = nn.ModuleList([nn.Conv1d(W // 2, 3, 1) for i in range(24)])
+        self.feature_fc = nn.Conv1d(W, W, 1)
+        self.latent_fc = nn.Conv1d(nf_latent_dim + W, W, 1)
+        self.view_fc = nn.Conv1d(W + embedder.view_dim, W // 2, 1)
+        self.rgb_fc = nn.Conv1d(W // 2, 3, 1)
 
     def calculate_alpha(self, nf_pts):
         raise NotImplementedError
@@ -264,41 +261,35 @@ class TPoseHuman(nn.Module):
             rgb:   1 x 3 x n
         '''
         pts_bounds = part_bounds[0, part_idx]           # 1 x n x 2 x 3
-        grid_coords = get_grid_coords(part_coord, pts_bounds)[None]
+        grid_coords = get_grid_coords(part_coord, pts_bounds, delta=1.0)[None]
         n = grid_coords.shape[1]
-        #net = grid_coords.new_zeros((1, n, self.triplane_c*3))
+        net = grid_coords.new_zeros((1, n, self.triplane_c*3))
         ret_alpha = grid_coords.new_zeros((1, n, 1))
         ret_rgb = grid_coords.new_zeros((1, n, 3))      # 1 x n x 27
         viewdir = embedder.view_embedder(viewdir)
-        for i in range(24):
+        for i in range(0, 24):
             part_msk = (part_idx == i)                  # 1 x n
+            #print(f"part{i}: ",part_msk.sum().item())
             if part_msk.sum().item() != 0 :
                 part_grid_coord = grid_coords[part_msk]
                 part_triplanes = self.part_triplanes[i]
                 part_feature = bilinear_sample_triplanes(part_grid_coord, part_triplanes)
-                #net[part_msk] = part_feature
+                net[part_msk] = part_feature
+        net = self.pts_linears( net.transpose(1,2) )
+        alpha = self.alpha_fc(net)
 
-                net = part_feature[None].permute(0, 2, 1)
-                net = self.pts_linears[i]( net )
-                alpha = self.alpha_fc[i](net)
-                ret_alpha[part_msk] = alpha[0].transpose(0,1)
+        features = self.feature_fc(net)
 
-                features = self.feature_fc[i](net)
+        latent = self.nf_latent(ind)
+        latent = latent[..., None].expand(*latent.shape, net.size(2))
+        features = torch.cat((features, latent), dim=1)
+        features = self.latent_fc(features)
 
-                latent = self.nf_latent(ind)
-                latent = latent[..., None].expand(*latent.shape, net.size(2))
-                features = torch.cat((features, latent), dim=1)
-                features = self.latent_fc[i](features)
-
-                viewdir_ = viewdir[part_msk].transpose(0,1)[None]
-                features = torch.cat((features, viewdir_), dim=1)
-                net = self.actvn(self.view_fc[i](features))
-                rgb = self.rgb_fc[i](net)
-                ret_rgb[part_msk] = rgb[0].transpose(0,1)
-        ret_alpha = ret_alpha.permute(0,2,1)
-        ret_rgb = ret_rgb.permute(0,2,1)
+        features = torch.cat((features, viewdir.transpose(1, 2)), dim=1)
+        net = self.actvn(self.view_fc(features))
+        rgb = self.rgb_fc(net)
                 
-        return ret_alpha, ret_rgb
+        return alpha, rgb
 
         net = net.permute(0, 2, 1)
         net = self.pts_linears( net )
