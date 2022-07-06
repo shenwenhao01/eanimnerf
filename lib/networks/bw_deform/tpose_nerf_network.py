@@ -138,13 +138,14 @@ class Network(nn.Module):
                                             batch['tbounds'])
         init_tbw = init_tbw[:, :24]
         ind = torch.zeros_like(batch['latent_index'])
-        tbw = self.calculate_neural_blend_weights(tpose, init_tbw, ind)     # [1, 24, n]
+        #tbw = self.calculate_neural_blend_weights(tpose, init_tbw, ind)     # [1, 24, n]
 
-        tcenters = batch['tcenters']                                        # 1 x 24 x 3
+        tcenters = batch['tcenters']                                         # 1 x 24 x 3
         #part_idx = torch.argmax(tbw, dim=1)                                 # 1 x n
-        part_idx = torch.argmax(init_tbw, dim=1)
+        part_idx = torch.argmax(init_tbw, dim=1)                            # 1 x n
+        part_idx = batch['search_table'][0,part_idx]
         part_centers = tcenters[ 0, part_idx ]                              # 1 x n x 3
-        tpart_coord = tpose - part_centers
+        tpart_coord = tpose - part_centers.squeeze(2)
 
         viewdir = viewdir[None]
         ind = batch['latent_index']
@@ -165,8 +166,8 @@ class Network(nn.Module):
         alpha_ind = alpha.detach() > cfg.train_th
         max_ind = torch.argmax(alpha, dim=1)
         alpha_ind[torch.arange(alpha.size(0)), max_ind] = True
-        pbw = pbw.transpose(1, 2)[alpha_ind][None]
-        tbw = tbw.transpose(1, 2)[alpha_ind][None]
+        #pbw = pbw.transpose(1, 2)[alpha_ind][None]
+        #tbw = tbw.transpose(1, 2)[alpha_ind][None]
 
         raw2alpha = lambda raw, dists, act_fn=F.relu: 1. - torch.exp(-act_fn(
             raw) * dists)
@@ -194,10 +195,10 @@ class TPoseHuman(nn.Module):
         nf_latent_dim = 128
         self.nf_latent = nn.Embedding(cfg.num_train_frame, nf_latent_dim)
 
-        self.triplane_c = 24
+        self.triplane_c = 12
         self.triplane_res = 128
         self.part_triplanes = nn.Parameter(
-                                torch.randn(24, self.triplane_c*3, self.triplane_res, self.triplane_res)
+                                torch.randn(12, self.triplane_c*3, self.triplane_res, self.triplane_res)
                                 )
         self.actvn = nn.ReLU()
         W = 128
@@ -261,13 +262,15 @@ class TPoseHuman(nn.Module):
             rgb:   1 x 3 x n
         '''
         pts_bounds = part_bounds[0, part_idx]           # 1 x n x 2 x 3
-        grid_coords = get_grid_coords(part_coord, pts_bounds, delta=1.0)[None]
+        #print(part_coord.shape)
+        grid_coords = get_grid_coords(part_coord, pts_bounds, delta=2.0)[None]
         n = grid_coords.shape[1]
         net = grid_coords.new_zeros((1, n, self.triplane_c*3))
         ret_alpha = grid_coords.new_zeros((1, n, 1))
         ret_rgb = grid_coords.new_zeros((1, n, 3))      # 1 x n x 27
         viewdir = embedder.view_embedder(viewdir)
-        for i in range(0, 24):
+        self.nPart = part_bounds.shape[1]
+        for i in range(0, self.nPart):
             part_msk = (part_idx == i)                  # 1 x n
             #print(f"part{i}: ",part_msk.sum().item())
             if part_msk.sum().item() != 0 :

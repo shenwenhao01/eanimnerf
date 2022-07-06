@@ -64,7 +64,20 @@ class Dataset(data.Dataset):
         self.tbounds = if_nerf_dutils.get_bounds(self.tvertices)                # T-pose 的 bbox (2, 3)
         tbw = np.load(os.path.join(self.lbs_root, 'tbw.npy'))                   # T-pose blend weights? (73, 71, 19, 25)
         self.tbw = tbw.astype(np.float32)
-        self.tpose_part_centers, self.tpose_part_bounds = self.process_tpart()
+        self.tpose_part_centers, self.tpose_part_bounds, self.search_table = self.process_tpart()
+
+    @staticmethod
+    def bounds_from_vertices(vertices, scale=1.1, keep_scale=True):
+        min_bounds = vertices.min(axis=0)
+        max_bounds = vertices.max(axis=0)
+        center = (min_bounds + max_bounds)/2
+        scale = ((max_bounds - min_bounds)/2 * scale)
+        if keep_scale:
+            scale = scale.max()
+        min_bounds = center - scale
+        max_bounds = center + scale
+        bounds = np.stack([min_bounds, max_bounds])
+        return bounds
 
     def process_tpart(self):
         import torch
@@ -73,24 +86,50 @@ class Dataset(data.Dataset):
         tbw = torch.from_numpy( self.tbw[None] )
         tbw = pts_sample_blend_weights(tvertices, tbw, tbounds)
         tbw = tbw[0, :24]
-        idx = torch.argmax(tbw, dim=0)
-        #print(tbw.shape)
-        part_center_list = []
-        part_bounds_list = []
-        for i in range(24):
-            part_vertices = tvertices[0, torch.argmax(tbw, dim=0)==i, :]
-            if False:
-                write_pcd(f"part-{i}.ply", part_vertices.numpy(), generate_bar(part_vertices.shape[0]))
-            part_center = torch.mean(part_vertices, dim=0)
-            part_bounds = if_nerf_dutils.get_part_bounds(part_vertices.numpy())
-            part_center_list.append( part_center )
-            part_bounds_list.append( part_bounds )
-        center = torch.vstack(part_center_list)
-        bounds = np.vstack(part_bounds_list)
-        center = center.numpy().astype(np.float32)
-        bounds = bounds.astype(np.float32)
+        partid = torch.argmax(tbw, dim=0)                   # 6890 Tensor
 
-        return center, bounds
+        center_list, bounds_list, part_list, big_part_list = [], [], [], []
+        for nj in range(24):
+            part = tvertices[0, partid==nj, :].detach().cpu().numpy()
+            part_list.append(part)
+            if False:
+                write_pcd(f"part-{i}.ply", part.numpy(), generate_bar(part.shape[0]))
+
+        # concat into 11 big parts
+        map_list = [
+            [20, 22],               # l_hand
+            [21, 23],               # r_hand
+            [ 7, 10],               # l_foot
+            [ 8, 11],               # r_foot
+            [16, 18],               # l_arm
+            [17, 19],               # r_arm
+            [ 1,  4],               # l_leg
+            [ 2,  5],               # r_leg
+            [ 0,  3, 6],            # lower_torso
+            [ 9, 12, 13, 14],       # upper_torso
+            [15]                    # head
+        ]
+        search_table = np.zeros(24, dtype=int)
+        for i in range(len(map_list)):
+            assert isinstance(map_list[i], list), "Wrong mapping list"
+            part_stack_list = []
+            for partid in map_list[i]:
+                part_stack_list.append(part_list[partid])
+                search_table[partid] = i
+            big_part_list.append(np.concatenate(part_stack_list, axis=0))
+        print(search_table)
+        assert len(big_part_list) == len(map_list)
+        self.nBigPart = len(big_part_list)
+        for ni in range( self.nBigPart ):
+            big_part = big_part_list[ni]
+            center = big_part.mean(axis=0, keepdims=True)
+            bounds = self.bounds_from_vertices(big_part, scale=1.5)
+            print('[Aninerf - Big Part {}] center = {}, bounds=({}) '.format(ni, center, bounds[1] - bounds[0]))
+            center_list.append(center)
+            bounds_list.append(bounds)
+        center = np.stack(center_list)
+        bounds = np.stack(bounds_list)
+        return center, bounds, search_table
 
     def prepare_input(self, i):
         if self.human in ['CoreView_313', 'CoreView_315']:
@@ -199,6 +238,7 @@ class Dataset(data.Dataset):
             'tbounds': self.tbounds,
             'tcenters': self.tpose_part_centers,     # tpose的part centers (24, 3)
             'tpart_bounds': self.tpose_part_bounds,  # tpose的part bounds (24, 3)
+            'search_table': self.search_table,          # mapping: smpl part -> big part (24)
         }
         ret.update(meta)
 
